@@ -1,0 +1,26 @@
+# Compiled binary
+spigot
+
+# Object files
+*.o
+*.obj
+
+# Editor backups
+*~
+*.swp
+*.swo
+*.bak
+
+# IDE files
+.vscode/
+.idea/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test files generated during development
+test_dir/
+*.html
+core
