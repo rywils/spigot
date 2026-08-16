@@ -114,7 +114,7 @@ void* handle_client_thread(void* arg) {
         snprintf(full_path, sizeof(full_path), "%s/%s", base_dir, file_path);
     }
 
-    int status = send_response(client_fd, full_path, path);
+    int status = send_response(client_fd, full_path, path, base_dir);
     printf("[%s] %s → %d\n", method, path, status);
     close(client_fd);
 

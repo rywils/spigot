@@ -1,3 +1,4 @@
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,6 +11,39 @@
 
 #include "file.h"
 #include "http.h"
+
+/* Lexical checks in server.c only catch ".." in the request path - a
+ * symlink physically sitting inside base_dir (e.g. `ln -s /etc leak`)
+ * would still be followed by stat()/fopen() straight out of the served
+ * tree. realpath() both sides and confirm full_path resolves to base_dir
+ * itself or somewhere inside it.
+ *
+ * A full_path that doesn't exist yet is treated as safe (returns 1) -
+ * realpath() can't resolve something that isn't there, and that's an
+ * ordinary lookup miss for the caller's normal 404 path, not a
+ * containment violation. Only an existing path that resolves outside
+ * base_dir is rejected.
+ *
+ * Note: there's a TOCTOU window between this check and the fopen() that
+ * follows it - a symlink could theoretically be swapped in between. Not
+ * closing that here (would need per-component openat()+O_NOFOLLOW
+ * resolution) since this is a single-request, no-auth local dev server,
+ * not a multi-tenant host; the realistic threat here is a static symlink
+ * sitting in the tree, which this does catch. */
+static int path_is_within_base(const char *full_path, const char *base_dir) {
+    char resolved_base[PATH_MAX];
+    char resolved_full[PATH_MAX];
+
+    if (!realpath(base_dir, resolved_base)) return 0;
+    if (!realpath(full_path, resolved_full)) return 1;
+
+    size_t base_len = strlen(resolved_base);
+    if (strncmp(resolved_full, resolved_base, base_len) != 0) return 0;
+
+    /* Require an exact match or a '/' boundary, so base_dir "/srv/www"
+     * doesn't wrongly match a sibling like "/srv/wwwevil". */
+    return resolved_full[base_len] == '\0' || resolved_full[base_len] == '/';
+}
 
 /* Appends to buf like snprintf, but tracks *pos so remaining space never
  * goes negative/wraps once the buffer fills - stops appending instead of
@@ -139,14 +173,19 @@ void send_directory_listing(int client_fd, const char *dir_path, const char *url
     send(client_fd, html, pos, 0);
 }
 
-int send_response(int client_fd, const char *file_path, const char *url_path) {
+int send_response(int client_fd, const char *file_path, const char *url_path, const char *base_dir) {
+    if (!path_is_within_base(file_path, base_dir)) {
+        send_error_response(client_fd, 403, "Forbidden", "text/plain", "Forbidden\n");
+        return 403;
+    }
+
     if (is_directory(file_path)) {
         char index_path[512];
         snprintf(index_path, sizeof(index_path), "%s/index.html", file_path);
         FILE *fp = fopen(index_path, "rb");
         if (fp) {
             fclose(fp);
-            return send_response(client_fd, index_path, url_path);
+            return send_response(client_fd, index_path, url_path, base_dir);
         }
         send_directory_listing(client_fd, file_path, url_path);
         return 200;
