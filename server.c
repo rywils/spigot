@@ -18,6 +18,16 @@ struct client_info {
     int enable_reload;
 };
 
+/* Sends 403, logs it, and releases the connection's resources - the
+ * cleanup every path-safety rejection needs. */
+static void reject_forbidden(int client_fd, struct client_info *info,
+                              const char *method, const char *path) {
+    send_error_response(client_fd, 403, "Forbidden", "text/plain", "Forbidden\n");
+    printf("[%s] %s → 403\n", method, path);
+    close(client_fd);
+    free(info);
+}
+
 void* handle_client_thread(void* arg) {
     struct client_info* info = (struct client_info*)arg;
     int client_fd = info->client_fd;
@@ -25,7 +35,6 @@ void* handle_client_thread(void* arg) {
 
     char buffer[BUFFER_SIZE];
     memset(buffer, 0, sizeof(buffer));
-
 
     ssize_t bytes_read = recv(client_fd, buffer, BUFFER_SIZE - 1, 0);
     if (bytes_read <= 0) {
@@ -45,12 +54,8 @@ void* handle_client_thread(void* arg) {
     char path[256];
     url_decode(raw_path, path, sizeof(path));
 
-
     if (path[0] != '/') {
-        send_error_response(client_fd, 403, "Forbidden", "text/plain", "Forbidden\n");
-        printf("[%s] %s → 403\n", method, path);
-        close(client_fd);
-        free(info);
+        reject_forbidden(client_fd, info, method, path);
         return NULL;
     }
 
@@ -58,25 +63,16 @@ void* handle_client_thread(void* arg) {
     while (*p) {
         if (p[0] == '/' && p[1] == '.') {
             if (p[2] == '.' && (p[3] == '/' || p[3] == '\0')) {
-                send_error_response(client_fd, 403, "Forbidden", "text/plain", "Forbidden\n");
-                printf("[%s] %s → 403\n", method, path);
-                close(client_fd);
-                free(info);
+                reject_forbidden(client_fd, info, method, path);
                 return NULL;
             }
             if (p[2] == '/' || p[2] == '\0') {
-                send_error_response(client_fd, 403, "Forbidden", "text/plain", "Forbidden\n");
-                printf("[%s] %s → 403\n", method, path);
-                close(client_fd);
-                free(info);
+                reject_forbidden(client_fd, info, method, path);
                 return NULL;
             }
         }
         if (p[0] == '/' && p[1] == '/') {
-            send_error_response(client_fd, 403, "Forbidden", "text/plain", "Forbidden\n");
-            printf("[%s] %s → 403\n", method, path);
-            close(client_fd);
-            free(info);
+            reject_forbidden(client_fd, info, method, path);
             return NULL;
         }
         p++;
@@ -105,14 +101,20 @@ void* handle_client_thread(void* arg) {
     }
 
     const char *file_path = path + 1;
-    if (file_path[0] == '\0') {
-        file_path = "index.html";
-    }
 
     char full_path[512];
-    snprintf(full_path, sizeof(full_path), "%s/%s", base_dir, file_path);
+    if (file_path[0] == '\0') {
+        /* Root request: let send_response's own is_directory/index.html/
+         * listing logic decide, same as it already does for subdirectory
+         * requests - don't shortcut straight to "index.html" here, or a
+         * base_dir with no index.html at the top level 404s instead of
+         * falling back to a directory listing. */
+        snprintf(full_path, sizeof(full_path), "%s", base_dir);
+    } else {
+        snprintf(full_path, sizeof(full_path), "%s/%s", base_dir, file_path);
+    }
 
-    int status = send_response(client_fd, full_path, path);
+    int status = send_response(client_fd, full_path, path, base_dir);
     printf("[%s] %s → %d\n", method, path, status);
     close(client_fd);
 

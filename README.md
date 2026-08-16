@@ -10,8 +10,8 @@ Designed for:
 
 * spinning up a quick local server
 * demoing basic web development to your friends who ask questions
-- whenever you have a .html file and need to spin up a quick server
-- basic testing
+* whenever you have a .html file and need to spin up a quick server
+* basic testing
 
 ---
 
@@ -144,7 +144,7 @@ Basic protections included:
 
 * Blocks `..` (directory traversal)
 * Sanitizes request paths
-- Basic url decoding
+* Basic url decoding
 
 ### This is **not production-ready**
 
@@ -193,8 +193,7 @@ This project is intentionally:
 It is **not meant to replace full web servers**, but to:
 
 * prototype quickly
-* use for convenience only
-* use when needed for something quick
+* serve as a quick convenience tool
 * minor testing
 
 ---
@@ -223,7 +222,3 @@ Because sometimes you just want:
 ```bash
 ./spigot
 ```
-
----
-
-## …and we're done.
