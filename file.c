@@ -1,3 +1,4 @@
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,6 +10,22 @@
 
 #include "file.h"
 #include "http.h"
+
+/* Appends to buf like snprintf, but tracks *pos so remaining space never
+ * goes negative/wraps once the buffer fills - stops appending instead of
+ * overflowing. */
+static void append_bounded(char *buf, size_t buf_size, int *pos, const char *fmt, ...) {
+    if (*pos < 0 || (size_t)*pos >= buf_size) return;
+
+    va_list args;
+    va_start(args, fmt);
+    int written = vsnprintf(buf + *pos, buf_size - (size_t)*pos, fmt, args);
+    va_end(args);
+
+    if (written < 0) return;
+    *pos += written;
+    if ((size_t)*pos > buf_size) *pos = (int)buf_size;
+}
 
 time_t last_modified_time = 0;
 time_t last_scan_time = 0;
@@ -49,7 +66,10 @@ time_t get_latest_modification(const char *path) {
         char full_path[512];
         snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
 
-        if (stat(full_path, &st) == 0) {
+        /* lstat, not stat: a symlinked directory must not be followed into
+         * recursion, or a symlink cycle (e.g. `ln -s . self`) inside the
+         * served directory causes unbounded recursion and a stack overflow. */
+        if (lstat(full_path, &st) == 0) {
             if (st.st_mtime > max_mtime) {
                 max_mtime = st.st_mtime;
             }
@@ -95,23 +115,21 @@ void send_directory_listing(int client_fd, const char *dir_path, const char *url
         return;
     }
 
-
     char html[65536];
     int pos = 0;
-    pos += snprintf(html + pos, sizeof(html) - pos,
-                      "<html><head><title>Index of %s</title></head><body>", url_path);
-    pos += snprintf(html + pos, sizeof(html) - pos, "<h1>Index of %s</h1><ul>", url_path);
+    append_bounded(html, sizeof(html), &pos,
+                   "<html><head><title>Index of %s</title></head><body>", url_path);
+    append_bounded(html, sizeof(html), &pos, "<h1>Index of %s</h1><ul>", url_path);
 
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
         if (entry->d_name[0] == '.') continue;
-        pos += snprintf(html + pos, sizeof(html) - pos,
-                        "<li><a href=\"%s\">%s</a></li>", entry->d_name, entry->d_name);
+        append_bounded(html, sizeof(html), &pos,
+                       "<li><a href=\"%s\">%s</a></li>", entry->d_name, entry->d_name);
     }
     closedir(dir);
 
-    pos += snprintf(html + pos, sizeof(html) - pos, "</ul></body></html>");
-
+    append_bounded(html, sizeof(html), &pos, "</ul></body></html>");
 
     char header[256];
     snprintf(header, sizeof(header),
@@ -141,7 +159,6 @@ int send_response(int client_fd, const char *file_path, const char *url_path) {
         return 404;
     }
 
-
     fseek(fp, 0, SEEK_END);
     long file_size = ftell(fp);
     fseek(fp, 0, SEEK_SET);
@@ -150,50 +167,46 @@ int send_response(int client_fd, const char *file_path, const char *url_path) {
 
     if (reload_enabled && strcmp(content_type, "text/html") == 0) {
         char *file_content = malloc(file_size + 1);
-        if (file_content) {
-            if (fread(file_content, 1, file_size, fp) == (size_t)file_size) {
-                file_content[file_size] = '\0';
+        char *modified_content = NULL;
+        long modified_size = 0;
 
-                const char *reload_script = "<script>setInterval(async()=>{const r=await fetch('/__reload_check');const t=await r.text();if(t==='1')location.reload()},1000)</script>";
+        if (file_content && fread(file_content, 1, file_size, fp) == (size_t)file_size) {
+            file_content[file_size] = '\0';
 
-                char *body_end = strstr(file_content, "</body>");
-                char *modified_content;
-                long modified_size;
+            const char *reload_script = "<script>setInterval(async()=>{const r=await fetch('/__reload_check');const t=await r.text();if(t==='1')location.reload()},1000)</script>";
+            char *body_end = strstr(file_content, "</body>");
+            modified_size = file_size + (long)strlen(reload_script);
+            modified_content = malloc(modified_size);
 
+            if (modified_content) {
                 if (body_end) {
-                    modified_size = file_size + strlen(reload_script);
-                    modified_content = malloc(modified_size);
-                    if (modified_content) {
-                        int prefix_len = body_end - file_content;
-                        memcpy(modified_content, file_content, prefix_len);
-                        memcpy(modified_content + prefix_len, reload_script, strlen(reload_script));
-                        memcpy(modified_content + prefix_len + strlen(reload_script), body_end, file_size - prefix_len);
-                    }
+                    long prefix_len = body_end - file_content;
+                    memcpy(modified_content, file_content, prefix_len);
+                    memcpy(modified_content + prefix_len, reload_script, strlen(reload_script));
+                    memcpy(modified_content + prefix_len + strlen(reload_script), body_end, file_size - prefix_len);
                 } else {
-                    modified_size = file_size + strlen(reload_script);
-                    modified_content = malloc(modified_size);
-                    if (modified_content) {
-                        memcpy(modified_content, file_content, file_size);
-                        memcpy(modified_content + file_size, reload_script, strlen(reload_script));
-                    }
+                    memcpy(modified_content, file_content, file_size);
+                    memcpy(modified_content + file_size, reload_script, strlen(reload_script));
                 }
-
-                if (modified_content) {
-                    char header[256];
-                    snprintf(header, sizeof(header),
-                             "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %ld\r\nConnection: close\r\n\r\n",
-                             modified_size);
-                    send(client_fd, header, strlen(header), 0);
-                    send(client_fd, modified_content, modified_size, 0);
-                    free(modified_content);
-                }
-                free(file_content);
-            } else {
-                free(file_content);
             }
         }
-        fclose(fp);
-        return 200;
+        free(file_content);
+
+        if (modified_content) {
+            char header[256];
+            snprintf(header, sizeof(header),
+                     "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %ld\r\nConnection: close\r\n\r\n",
+                     modified_size);
+            send(client_fd, header, strlen(header), 0);
+            send(client_fd, modified_content, modified_size, 0);
+            free(modified_content);
+            fclose(fp);
+            return 200;
+        }
+
+        /* Injection failed (OOM or short read) - fall back to serving the
+         * file unmodified instead of silently dropping the response. */
+        fseek(fp, 0, SEEK_SET);
     }
 
     char header[256];
