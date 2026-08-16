@@ -1,4 +1,3 @@
-#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,18 +30,32 @@
  * not a multi-tenant host; the realistic threat here is a static symlink
  * sitting in the tree, which this does catch. */
 static int path_is_within_base(const char *full_path, const char *base_dir) {
-    char resolved_base[PATH_MAX];
-    char resolved_full[PATH_MAX];
+    char *resolved_base = realpath(base_dir, NULL);
+    if (!resolved_base) return 0;
 
-    if (!realpath(base_dir, resolved_base)) return 0;
-    if (!realpath(full_path, resolved_full)) return 1;
+    char *resolved_full = realpath(full_path, NULL);
+    if (!resolved_full) {
+        free(resolved_base);
+        return 1;
+    }
 
     size_t base_len = strlen(resolved_base);
-    if (strncmp(resolved_full, resolved_base, base_len) != 0) return 0;
+    int result;
 
-    /* Require an exact match or a '/' boundary, so base_dir "/srv/www"
-     * doesn't wrongly match a sibling like "/srv/wwwevil". */
-    return resolved_full[base_len] == '\0' || resolved_full[base_len] == '/';
+    if (strncmp(resolved_full, resolved_base, base_len) != 0) {
+        result = 0;
+    } else if (strcmp(resolved_base, "/") == 0) {
+        /* Special case: if base is root "/", any absolute path is within it. */
+        result = 1;
+    } else {
+        /* Require an exact match or a '/' boundary, so base_dir "/srv/www"
+         * doesn't wrongly match a sibling like "/srv/wwwevil". */
+        result = resolved_full[base_len] == '\0' || resolved_full[base_len] == '/';
+    }
+
+    free(resolved_base);
+    free(resolved_full);
+    return result;
 }
 
 /* Appends to buf like snprintf, but tracks *pos so remaining space never
